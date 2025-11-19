@@ -2,7 +2,7 @@ export const fetchVehiclePathData = {
     "fetchVehiclePathResult": 0,
     "isHaveCoupleArea": false,
     "penColor": "#7fb80e", // 线条颜色
-    "penInt": 5, // 线条宽度
+    "penInt": 4, // 线条宽度
     "fetchVehicledPathResPathMapInfoList": [
         {
             "mapIndex": 0,
