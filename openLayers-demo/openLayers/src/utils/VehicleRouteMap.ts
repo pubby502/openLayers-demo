@@ -30,19 +30,18 @@ export interface VehicleRouteMapOptions {
   strokeWidth: number
   path: RoutePoint[]
   padding?: number[]
-  arrowSpacing?: number
   startIconUrl?: string
   endIconUrl?: string
-  arrowIconUrl?: string
   iconScale?: number
-  arrowScale?: number
+  ownerIconUrl?: string
+  ownerDuration?: number
   onReady?: () => void
 }
 
 const DEFAULT_PADDING = [40, 40, 40, 40]
 const DEFAULT_START_ICON = '/static/start.png'
 const DEFAULT_END_ICON = '/static/end.png'
-const DEFAULT_ARROW_ICON = '/static/arrow.png'
+const DEFAULT_OWNER_ICON = '/static/owner.png'
 const ICON_ANCHOR: [number, number] = [0.5, 0.5]
 
 export class VehicleRouteMap {
@@ -55,12 +54,14 @@ export class VehicleRouteMap {
   private routeStyle: Style
   private startStyle: Style
   private endStyle: Style
-  private arrowIconUrl: string
   private startIconUrl: string
   private endIconUrl: string
   private iconScale: number
-  private arrowBaseScale: number
-  private arrowScaleFactor: number
+  private ownerIconUrl: string
+  private ownerStyle: Style
+  private ownerDuration: number
+  private ownerFeature?: Feature<Point>
+  private animationFrameId?: number
   private imageLoaded = false
   private pendingPath: RoutePoint[] = []
   private resizeHandler = () => {
@@ -71,17 +72,16 @@ export class VehicleRouteMap {
     this.extent = [0, 0, options.imageWidth, options.imageHeight]
     this.projection = this.createProjection(options)
     this.iconScale = options.iconScale ?? 1.5
-    this.arrowBaseScale = options.arrowScale ?? this.iconScale * 1.2
-    this.arrowScaleFactor =
-      this.iconScale === 0 ? 1 : this.arrowBaseScale / this.iconScale
+    this.ownerDuration = options.ownerDuration ?? 6000
     this.startIconUrl = options.startIconUrl ?? DEFAULT_START_ICON
     this.endIconUrl = options.endIconUrl ?? DEFAULT_END_ICON
-    this.arrowIconUrl = options.arrowIconUrl ?? DEFAULT_ARROW_ICON
+    this.ownerIconUrl = options.ownerIconUrl ?? DEFAULT_OWNER_ICON
 
     this.vectorSource = new VectorSource()
     this.routeStyle = this.createRouteStyle(options)
     this.startStyle = this.createIconStyle(this.startIconUrl)
     this.endStyle = this.createIconStyle(this.endIconUrl)
+    this.ownerStyle = this.createIconStyle(this.ownerIconUrl, this.iconScale * 1.1)
     this.routeLayer = this.createVectorLayer()
     this.imageLayer = this.createImageLayer(options.imageUrl)
 
@@ -164,8 +164,8 @@ export class VehicleRouteMap {
     endFeature.set('type', 'end')
     this.vectorSource.addFeature(endFeature)
 
-    const arrowFeatures = this.createArrowFeatures(line)
-    arrowFeatures.forEach((feature) => this.vectorSource.addFeature(feature))
+    this.initOwnerFeature(normalized[0])
+    this.animateOwnerAlongPath(line)
   }
 
   public updatePath(path: RoutePoint[]) {
@@ -177,11 +177,13 @@ export class VehicleRouteMap {
 
   public destroy() {
     window.removeEventListener('resize', this.resizeHandler)
+    this.cancelOwnerAnimation()
     if (this.map) {
       this.map.setTarget(undefined)
       this.map = undefined
     }
     this.vectorSource.clear()
+    this.ownerFeature = undefined
   }
 
   private bindImageEvents() {
@@ -211,7 +213,7 @@ export class VehicleRouteMap {
   private getFeatureStyle(feature: FeatureLike, resolution: number) {
     const type = feature.get('type')
     const scale = this.getScaleForResolution(resolution)
-  
+
     if (type === 'start') {
       const img = this.startStyle.getImage()
       img && img.setScale(scale)
@@ -222,10 +224,6 @@ export class VehicleRouteMap {
       img && img.setScale(scale)
       return this.endStyle
     }
-    if (type === 'arrow') {
-      const rotation = feature.get('rotation') || 0
-      return this.getArrowStyle(rotation, scale)
-    }
     return this.routeStyle
   }
 
@@ -235,60 +233,50 @@ export class VehicleRouteMap {
     return Math.min(Math.max(s, base * 0.5), base * 2)
   }
 
-  private getArrowStyle(rotation: number, scale: number) {
-    return new Style({
-      image: new Icon({
-        src: this.arrowIconUrl,
-        anchor: [0.5, 0.5],
-        anchorXUnits: 'fraction',
-        anchorYUnits: 'fraction',
-        scale: Math.max(scale * this.arrowScaleFactor, 0.1),
-        rotateWithView: true,
-        rotation
+  private initOwnerFeature(startCoordinate: Coordinate) {
+    if (!this.ownerFeature) {
+      this.ownerFeature = new Feature({
+        geometry: new Point(startCoordinate)
       })
-    })
+      this.ownerFeature.setStyle(this.ownerStyle)
+      this.vectorSource.addFeature(this.ownerFeature)
+    } else {
+      this.ownerFeature.getGeometry()?.setCoordinates(startCoordinate)
+    }
   }
 
-  private createArrowFeatures(line: LineString) {
-    const spacing =
-      this.options.arrowSpacing ??
-      Math.max(this.options.imageWidth, this.options.imageHeight) / 12
-    const totalLength = line.getLength()
-    if (!spacing || spacing <= 0 || totalLength === 0) {
-      return []
+  private animateOwnerAlongPath(line: LineString) {
+    if (!this.ownerFeature) return
+    this.cancelOwnerAnimation()
+    const duration = Math.max(this.ownerDuration, 1000)
+
+    const run = () => {
+      const startTime = this.getNow()
+      const step = (time: number) => {
+        const elapsed = time - startTime
+        let fraction = elapsed / duration
+        if (fraction >= 1) {
+          fraction = 1
+        }
+        const coordinate = line.getCoordinateAt(fraction)
+        this.ownerFeature?.getGeometry()?.setCoordinates(coordinate)
+        if (fraction < 1) {
+          this.animationFrameId = requestAnimationFrame(step)
+        } else {
+          this.animationFrameId = requestAnimationFrame(run)
+        }
+      }
+      this.animationFrameId = requestAnimationFrame(step)
     }
-    const features: Feature<Point>[] = []
-    for (let dist = spacing; dist < totalLength; dist += spacing) {
-      const fraction = dist / totalLength
-      const coordinate = line.getCoordinateAt(fraction)
-      const rotation = this.getDirectionAngle(line, fraction)
-      const feature = new Feature({
-        geometry: new Point(coordinate)
-      })
-      feature.set('type', 'arrow')
-      feature.set('rotation', rotation)
-      features.push(feature)
-    }
-    if (!features.length) {
-      const coordinate = line.getCoordinateAt(0.5)
-      const rotation = this.getDirectionAngle(line, 0.5)
-      const feature = new Feature({
-        geometry: new Point(coordinate)
-      })
-      feature.set('type', 'arrow')
-      feature.set('rotation', rotation)
-      features.push(feature)
-    }
-    return features
+
+    run()
   }
 
-  private getDirectionAngle(line: LineString, fraction: number) {
-    const delta = 1e-3
-    const start = line.getCoordinateAt(Math.max(0, fraction - delta))
-    const end = line.getCoordinateAt(Math.min(1, fraction + delta))
-    const dx = end[0] - start[0]
-    const dy = end[1] - start[1]
-    return Math.atan2(-dy, dx)
+  private cancelOwnerAnimation() {
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId)
+      this.animationFrameId = undefined
+    }
   }
 
   private createProjection(options: VehicleRouteMapOptions) {
@@ -310,14 +298,14 @@ export class VehicleRouteMap {
     })
   }
 
-  private createIconStyle(src: string) {
+  private createIconStyle(src: string, scale = this.iconScale) {
     return new Style({
       image: new Icon({
         src,
         anchor: ICON_ANCHOR,
         anchorXUnits: 'fraction',
         anchorYUnits: 'fraction',
-        scale: this.iconScale
+        scale
       })
     })
   }
@@ -337,6 +325,13 @@ export class VehicleRouteMap {
         projection: this.projection
       })
     })
+  }
+
+  private getNow() {
+    if (typeof performance !== 'undefined' && performance.now) {
+      return performance.now()
+    }
+    return Date.now()
   }
 }
 

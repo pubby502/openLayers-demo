@@ -145,9 +145,9 @@ const initMap = async () => {
       strokeColor: payload.penColor || '#ff0000',
       strokeWidth: Number(payload.penInt) || 6,
       path: pathPoints,
-      arrowSpacing: 1100,
       iconScale: 0.4,
-      arrowScale: 0.8,
+      ownerIconUrl: '/static/owner.png',
+      ownerDuration: 8000,
       onReady: () => {
         loading.value = false
         mapReady.value = true
